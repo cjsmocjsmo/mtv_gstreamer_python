@@ -1,118 +1,88 @@
-import asyncio
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GstRtspServer
-import fastapi
-from fastapi import FastAPI, WebSocket, BackgroundTasks
-import threading
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gst, GObject, Gtk
+
+import uvicorn
+from fastapi import FastAPI
 
 app = FastAPI()
-
-# Global variable for GStreamer pipeline (ensuring singleton-like behavior)
 pipeline = None
+drawing_area = None  # Holds the video display area
 
-def create_pipeline(path):
-    """
-    Creates and returns a GStreamer pipeline for video playback.
-    """
-    global pipeline
+@app.on_event("startup")
+async def startup_event():
+    Gst.init(None)
 
-    if pipeline is not None:
-        # Reuse existing pipeline if already created
-        return pipeline
+@app.post("/start/{path}")
+async def start_video(path: str):
+    global pipeline, drawing_area
 
-    # Create pipeline elements
-    pipeline = Gst.parse_launch(
-        f"filesrc location={path} ! decodebin ! autovideosink"
-    )
-
-    # Handle pipeline EOS (End-of-Stream) event
-    bus = pipeline.get_bus()
-    bus.add_watch(lambda bus, message: handle_eos(bus, message))
-
-    return pipeline
-
-def handle_eos(bus, message):
-    """
-    Handles End-of-Stream (EOS) event and stops the pipeline.
-    """
-    global pipeline
-
-    if message.get_structure().get_name() == "EOS":
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(lambda: stop_video())
-
-def start_video(path):
-    """
-    Starts video playback on the GStreamer pipeline.
-    """
-    global pipeline
-
-    pipeline = create_pipeline(path)
-
-    # Start the pipeline
-    pipeline.set_state(Gst.State.PLAYING)
-
-def stop_video():
-    """
-    Stops video playback on the GStreamer pipeline.
-    """
-    global pipeline
-
-    if pipeline is not None:
+    if pipeline:
         pipeline.set_state(Gst.State.NULL)
-        pipeline = None  # Reset pipeline for next request
 
-def pause_video():
-    """
-    Pauses video playback on the GStreamer pipeline.
-    """
+    # Create GTK window
+    window = Gtk.Window()
+    window.connect("destroy", Gtk.main_quit) # Stop on window close
+    window.set_default_size(800, 600)  # Adjust default size if needed
+
+    # Create drawing area for video
+    # drawing_area = Gtk.DrawingArea()
+    # window.add(drawing_area)
+    path = "/home/pipi/" + path
+    print(f"Playing video: {path}")
+
+    # Create GStreamer pipeline
+    pipeline = Gst.parse_launch(f"playbin uri={path}")
+
+    # Override video sink to use the GTK window
+    # bus = pipeline.get_bus()
+    # bus.add_signal_watch() 
+    # bus.connect("message::element", on_message)
+
+    pipeline.set_state(Gst.State.PLAYING)
+    window.show_all()
+    # window.fullscreen()  
+    Gtk.main()
+    return {"message": "Video started"}
+
+def on_message(bus, message):
+    t = message.type
+    if t == Gst.MessageType.EOS:
+        pipeline.set_state(Gst.State.NULL)
+    elif t == Gst.MessageType.ERROR:
+        pipeline.set_state(Gst.State.NULL)
+        err, debug = message.parse_error()
+        print(f"GStreamer Error: {err}, {debug}")
+    elif t == Gst.MessageType.STATE_CHANGED:
+        old_state, new_state, pending_state = message.parse_state_changed()
+        if new_state == Gst.State.PLAYING:
+            # Embed GStreamer video into the GTK window
+            xid = drawing_area.get_window().get_xid()
+            videosink = message.src
+            videosink.set_window_handle(xid)
+
+@app.post("/stop")
+async def stop_video():
     global pipeline
+    if pipeline:
+        pipeline.set_state(Gst.State.NULL)
+        pipeline = None
+    return {"message": "Video stopped"}
 
-    if pipeline is not None:
+@app.post("/pause")
+async def pause_video():
+    global pipeline
+    if pipeline:
         pipeline.set_state(Gst.State.PAUSED)
+    return {"message": "Video paused"}
 
-def play_video():
-    """
-    Resumes video playback on the GStreamer pipeline.
-    """
+@app.post("/play")
+async def play_video():
     global pipeline
-
-    if pipeline is not None:
+    if pipeline:
         pipeline.set_state(Gst.State.PLAYING)
-
-@app.get("/start/{path:path}")
-async def start_video_handler(path: str, background_tasks: BackgroundTasks):
-    """
-    Starts video playback based on the provided path.
-    """
-    background_tasks.add_task(start_video, path)
-    return {"message": "Video started successfully."}
-
-@app.get("/stop")
-async def stop_video_handler():
-    """
-    Stops video playback.
-    """
-    stop_video()
-    return {"message": "Video stopped successfully."}
-
-@app.get("/play")
-async def play_video_handler():
-    """
-    Resumes video playback from a paused state.
-    """
-    play_video()
-    return {"message": "Video playback resumed."}
-
-@app.get("/pause")
-async def pause_video_handler():
-    """
-    Pauses video playback.
-    """
-    pause_video()
-    return {"message": "Video playback paused."}
+    return {"message": "Video resumed"}
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="192.168.0.91", port=8000)
